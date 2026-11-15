@@ -62,10 +62,12 @@ class AmapNotificationService : NotificationListenerService() {
         if (connected === this) connected = null
         recordTimelineEvent(System.currentTimeMillis(), TimelineEvent.LISTENER_DISCONNECTED, "disconnected")
         tracked.clear()
-        updateNavigationPresent(tracked.isNotEmpty())
+        turns.reset()
+        updateNavigationPresent(tracked.isNotEmpty(), canAutoLaunch = false)
         WearAutoLaunch.onNavigationEnded()
         handler.removeCallbacks(resendAfterLaunch)
         removal?.let(handler::removeCallbacks)
+        removal = null
         publish(AmapCloseout.listenerDisconnected())
     }
 
@@ -79,8 +81,10 @@ class AmapNotificationService : NotificationListenerService() {
         val fields = listOf(Notification.EXTRA_TITLE, Notification.EXTRA_TEXT,
             Notification.EXTRA_BIG_TEXT, Notification.EXTRA_SUB_TEXT).mapNotNull { extras.getCharSequence(it)?.toString() } +
             (extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)?.map { it.toString() } ?: emptyList())
-        val instruction = AmapParser.parse(sbn.packageName, fields)
+        val sessionActive = tracked.isNotEmpty() || removal != null
+        val instruction = AmapParser.parse(sbn.packageName, fields, sessionActive = sessionActive)
         if (instruction == null) {
+            onTrackedKeyGone(sbn.key)
             recordTimelineEvent(System.currentTimeMillis(), TimelineEvent.AMAP_NOTIFICATION_IGNORED, "not-navigation")
             return
         }
@@ -89,13 +93,14 @@ class AmapNotificationService : NotificationListenerService() {
         removal = null
         if (instruction.status == "ended") {
             tracked.clear()
-            updateNavigationPresent(tracked.isNotEmpty())
+            turns.reset()
+            updateNavigationPresent(tracked.isNotEmpty(), canAutoLaunch = false)
             WearAutoLaunch.onNavigationEnded()
             handler.removeCallbacks(resendAfterLaunch)
             publish(AmapCloseout.navigationEnded())
         } else {
             tracked.add(sbn.key)
-            updateNavigationPresent(tracked.isNotEmpty())
+            updateNavigationPresent(tracked.isNotEmpty(), canAutoLaunch = instruction.action != "arrive")
             publish(instruction)
         }
     }
@@ -111,15 +116,21 @@ class AmapNotificationService : NotificationListenerService() {
     }
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         if (sbn.packageName != AmapParser.PACKAGE) return
+        onTrackedKeyGone(sbn.key)
+    }
+
+    private fun onTrackedKeyGone(key: String) {
         // A removal must update the wake-lease flag before the early return below.
-        val removed = tracked.remove(sbn.key)
-        updateNavigationPresent(tracked.isNotEmpty())
+        val removed = tracked.remove(key)
+        updateNavigationPresent(tracked.isNotEmpty(), canAutoLaunch = false)
         if (!removed || tracked.isNotEmpty()) return
         removal?.let(handler::removeCallbacks)
         // A removal alone is not proof of arrival/end. Stop displaying old directions after a grace period.
         removal = Runnable {
+            removal = null
             // Only an expired grace with nothing tracked left is a real session end.
             val closeout = AmapCloseout.afterRemovalGrace(tracked.isEmpty()) ?: return@Runnable
+            turns.reset()
             WearAutoLaunch.onNavigationEnded()
             handler.removeCallbacks(resendAfterLaunch)
             publish(closeout)
@@ -169,10 +180,10 @@ class AmapNotificationService : NotificationListenerService() {
         recordTimelineEvent(wallMs, TimelineEvent.RECOVERY_RESULT, outcome)
     }
     /** Writes the wake-lease flag; only a false-to-true edge asks for one auto launch. */
-    private fun updateNavigationPresent(present: Boolean) {
+    private fun updateNavigationPresent(present: Boolean, canAutoLaunch: Boolean = true) {
         val previous = ProbeRuntime.wakePolicy.amapNavigationPresent
         ProbeRuntime.wakePolicy.amapNavigationPresent = present
-        if (!previous && present) WearAutoLaunch.onNavigationStarted(this, ::scheduleResendAfterLaunch)
+        if (!previous && present && canAutoLaunch) WearAutoLaunch.onNavigationStarted(this, ::scheduleResendAfterLaunch)
     }
 
     /** One pending resend per launch; a newer launch replaces the older timer. */
@@ -191,7 +202,8 @@ class AmapNotificationService : NotificationListenerService() {
     }
 
     override fun onDestroy() {
-        updateNavigationPresent(false)
+        turns.reset()
+        updateNavigationPresent(false, canAutoLaunch = false)
         WearAutoLaunch.onNavigationEnded()
         handler.removeCallbacks(resendAfterLaunch)
         if (connected === this) {
@@ -199,6 +211,7 @@ class AmapNotificationService : NotificationListenerService() {
             publish(AmapCloseout.listenerDisconnected())
         }
         removal?.let(handler::removeCallbacks)
+        removal = null
         super.onDestroy()
     }
 }

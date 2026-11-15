@@ -64,4 +64,75 @@ class AmapParserTest {
         assertEquals("ended", ended.status)
         assertNull(ended.action)
     }
+
+    @Test fun ignoresRideHailingAndEtaArrivalNotices() {
+        // Ride-hailing ongoing / focus notifications (with or without explicit "打车" wording)
+        assertNull(AmapParser.parse(AmapParser.PACKAGE, listOf("预计 18:35 到达目的地", "剩余 5.6 公里")))
+        assertNull(AmapParser.parse(AmapParser.PACKAGE, listOf("距目的地 3.2公里", "预计 12分钟到达目的地")))
+        assertNull(AmapParser.parse(AmapParser.PACKAGE, listOf("行程中｜预计 18:35 到达目的地")))
+        assertNull(AmapParser.parse(AmapParser.PACKAGE, listOf("高德打车", "即将到达目的地")))
+        assertNull(AmapParser.parse(AmapParser.PACKAGE, listOf("即将到达目的地", "剩余 300 米")))
+        assertNull(AmapParser.parse(AmapParser.PACKAGE, listOf("已到达目的地", "请携带好随身物品")))
+        assertNull(AmapParser.parse(AmapParser.PACKAGE, listOf("已到达目的地"), sessionActive = false))
+    }
+
+    @Test fun acceptsGenuineNavigationArrivalAndIgnoresEtaSubtext() {
+        // Active navigation with arrival instruction
+        val withContext = AmapParser.parse(AmapParser.PACKAGE, listOf("20米后到达目的地", "高德导航中"))!!
+        assertEquals("active", withContext.status)
+        assertEquals("arrive", withContext.action)
+        assertEquals(20, withContext.distanceM)
+
+        // Bare arrival at the end of an already-active navigation session
+        val inSession = AmapParser.parse(AmapParser.PACKAGE, listOf("已到达目的地"), sessionActive = true)!!
+        assertEquals("active", inSession.status)
+        assertEquals("arrive", inSession.action)
+        assertNull(inSession.distanceM)
+
+        // Arrival combined with end-of-navigation closes out cleanly
+        val ended = AmapParser.parse(AmapParser.PACKAGE, listOf("到达目的地，本次导航结束"), sessionActive = true)!!
+        assertEquals("ended", ended.status)
+
+        // Generic ongoing notice + ETA subtext must not turn into premature "arrive"
+        val genericWithEta = AmapParser.parse(
+            AmapParser.PACKAGE,
+            listOf("正在为您步行导航", "剩余 1.2公里 预计 18:50 到达目的地"),
+        )!!
+        assertEquals("unrecognized", genericWithEta.status)
+        assertNull(genericWithEta.action)
+        assertNull(genericWithEta.distanceM)
+
+        // Turn instruction + remaining/ETA subtext keeps the turn distance, not remaining distance
+        val turnWithEta = AmapParser.parse(
+            AmapParser.PACKAGE,
+            listOf("32米后左转", "剩余 500米 预计 6分钟到达目的地"),
+        )!!
+        assertEquals("left", turnWithEta.action)
+        assertEquals(32, turnWithEta.distanceM)
+    }
+
+    @Test fun turnTrackerDoesNotRepeatArrivalOrInterleavedUnrecognized() {
+        val tracker = AmapTurnTracker()
+        val left30 = parse("30米后左转，进入中山路")
+        val id1 = tracker.actionId(left30)
+        // Interleaved unrecognized companion notice must not force a new turn ID for the same turn
+        tracker.actionId(parse("正在导航"))
+        assertEquals(id1, tracker.actionId(parse("20米后左转，进入中山路")))
+
+        // Consecutive arrival updates in the same session keep one actionId (vibrate once)
+        val arriveWithRoad = AmapParser.parse(
+            AmapParser.PACKAGE,
+            listOf("15米后到达目的地，进入中山路", "高德导航中"),
+        )!!
+        val arriveBare = AmapParser.parse(
+            AmapParser.PACKAGE,
+            listOf("已到达目的地", "高德导航中"),
+        )!!
+        val arriveId = tracker.actionId(arriveWithRoad)
+        assertEquals(arriveId, tracker.actionId(arriveBare))
+
+        // Session end resets the tracker so the next session gets a fresh turn ID
+        tracker.actionId(parse("导航已结束"))
+        assertNotEquals(arriveId, tracker.actionId(arriveBare))
+    }
 }

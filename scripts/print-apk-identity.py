@@ -30,8 +30,8 @@ SOURCE_PATH = (
 RECORD_PATH = REPO_ROOT / "app" / "build" / "outputs" / "apk" / "debug" / "apk-identity.txt"
 
 EXPECTED_PACKAGE = "com.minavigatering.probe"
-EXPECTED_VERSION_CODE = "1"
-EXPECTED_VERSION_NAME = "0.1.0"
+EXPECTED_VERSION_CODE = "2"
+EXPECTED_VERSION_NAME = "0.2.0"
 
 # Matches the badging first line, e.g.
 # package: name='com.minavigatering.probe' versionCode='1' versionName='0.1.0' ...
